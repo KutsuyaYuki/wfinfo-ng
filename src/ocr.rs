@@ -1,5 +1,7 @@
 use lazy_static::lazy_static;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use fraction::Fraction;
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::{collections::HashMap, sync::Mutex};
 use tesseract::Tesseract;
@@ -29,12 +31,17 @@ pub fn detect_theme(image: &DynamicImage) -> Theme {
     let primary_width = primary_monitor_size.width as f32;
     let primary_height = primary_monitor_size.height as f32;
 
+    let aspect_ratio = Fraction::from(primary_width / primary_height);
+    let primary_width_aspect = aspect_ratio.numer().unwrap().to_owned() as u32;
+    let primary_height_aspect = aspect_ratio.denom().unwrap().to_owned() as u32;
+
     // Calculate screen_scaling according to current monitor dimensions
-    let screen_scaling: f32 = if image.width() * 18 > image.height() * 43 {
-        image.height() as f32 / primary_height
-    } else {
-        image.width() as f32 / primary_width
-    };
+    let screen_scaling: f32 =
+        if image.width() * primary_width_aspect > image.height() * primary_height_aspect {
+            image.height() as f32 / primary_height
+        } else {
+            image.width() as f32 / primary_width
+        };
 
     let line_height = PIXEL_REWARD_LINE_HEIGHT / 2.0 * screen_scaling;
     let most_width = PIXEL_REWARD_WIDTH * screen_scaling;

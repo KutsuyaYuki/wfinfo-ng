@@ -39,3 +39,4 @@ env_logger = "0.11.5"
 reqwest = { version = "0.12.7", features = ["blocking"] }
 minifb = "0.25.0"
 winit = "0.24"
+fraction = "0.15.0"

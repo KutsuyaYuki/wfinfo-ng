@@ -1172,6 +1172,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fraction"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "864d054a996544d325470be9db9ff3be18319e568ad90b3b59f1b8bea046ab2f"
+dependencies = [
+ "lazy_static",
+ "num",
+]
+
+[[package]]
 name = "freetype-rs"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
