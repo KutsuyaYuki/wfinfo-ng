@@ -15,10 +15,10 @@ const PIXEL_REWARD_YDISPLAY: f32 = 316.0;
 const PIXEL_REWARD_LINE_HEIGHT: f32 = 48.0;
 
 pub fn detect_theme(image: &DynamicImage) -> Theme {
-    let screen_scaling = if image.width() * 9 > image.height() * 16 {
-        image.height() as f32 / 1080.0
+    let screen_scaling = if image.width() * 18 > image.height() * 43 {
+        image.height() as f32 / 1440.0
     } else {
-        image.width() as f32 / 1920.0
+        image.width() as f32 / 3440.0
     };
 
     let line_height = PIXEL_REWARD_LINE_HEIGHT / 2.0 * screen_scaling;
