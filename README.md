@@ -40,6 +40,8 @@ Now run `wfinfo <path to your EE.log file>` (the path is optional if your EE.log
 This will run the program, immediately taking a screenshot and analyzing it, see section Issues and Workarounds for why.
 The program then waits for the reward screen, trying to detect items in the screenshot.
 
+On my PC that would be: `cargo run --release --bin wfinfo /mnt/980Pro/SteamLibrary/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log`
+
 Once items are found, their platinum and ducat values are looked up in the database downloaded previously.
 Each item is printed to stdout along with it's platinum and ducat value in platinum (assuming 10:1 conversion).
 The highest value item is also indicated with a little arrow.
