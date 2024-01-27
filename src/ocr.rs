@@ -8,6 +8,7 @@ use image::{DynamicImage, GenericImageView, Pixel, Rgb};
 use log::debug;
 
 use crate::theme::Theme;
+use winit::{event_loop::EventLoop, window::WindowBuilder};
 
 const PIXEL_REWARD_WIDTH: f32 = 968.0;
 const PIXEL_REWARD_HEIGHT: f32 = 235.0;
@@ -15,10 +16,24 @@ const PIXEL_REWARD_YDISPLAY: f32 = 316.0;
 const PIXEL_REWARD_LINE_HEIGHT: f32 = 48.0;
 
 pub fn detect_theme(image: &DynamicImage) -> Theme {
-    let screen_scaling = if image.width() * 18 > image.height() * 43 {
-        image.height() as f32 / 1440.0
+    // Get the size of primary monitor
+    let event_loop = EventLoop::new();
+    let primary_monitor_size = WindowBuilder::new()
+        .with_visible(false)
+        .build(&event_loop)
+        .unwrap()
+        .primary_monitor()
+        .expect("Unable to get primary monitor")
+        .size();
+
+    let primary_width = primary_monitor_size.width as f32;
+    let primary_height = primary_monitor_size.height as f32;
+
+    // Calculate screen_scaling according to current monitor dimensions
+    let screen_scaling: f32 = if image.width() * 18 > image.height() * 43 {
+        image.height() as f32 / primary_height
     } else {
-        image.width() as f32 / 3440.0
+        image.width() as f32 / primary_width
     };
 
     let line_height = PIXEL_REWARD_LINE_HEIGHT / 2.0 * screen_scaling;
