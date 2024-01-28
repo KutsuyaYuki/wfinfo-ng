@@ -12,6 +12,7 @@ use clap::Parser;
 use env_logger::{Builder, Env};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use image::DynamicImage;
+use imgui_winit_glow_renderer_viewports::Renderer;
 use log::{debug, error, info, warn};
 use notify::{watcher, RecursiveMode, Watcher};
 use xcap::Window;
@@ -22,7 +23,34 @@ use wfinfo::{
     utils::fetch_prices_and_items,
 };
 
-fn run_detection(capturer: &Window, db: &Database) {
+use std::{ffi::CString, num::NonZeroU32, time::Instant};
+
+use glow::{Context, HasContext};
+use glutin::{
+    config::ConfigTemplateBuilder,
+    context::ContextAttributesBuilder,
+    display::GetGlDisplay,
+    prelude::{
+        GlDisplay, NotCurrentGlContextSurfaceAccessor, PossiblyCurrentContextGlSurfaceAccessor,
+    },
+    surface::{GlSurface, SurfaceAttributesBuilder, WindowSurface},
+};
+use glutin_winit::DisplayBuilder;
+use imgui::ConfigFlags;
+use raw_window_handle::HasRawWindowHandle;
+use winit::{
+    dpi::{LogicalSize, PhysicalPosition},
+    event::WindowEvent,
+    event_loop::EventLoop,
+    platform::unix::{WindowBuilderExtUnix, XWindowType},
+    window::WindowBuilder,
+};
+
+use imgui::*;
+
+mod support;
+
+fn run_detection(capturer: &Window, db: &Database) -> String {
     let frame = capturer.capture_image().unwrap();
     info!("Captured");
     let image = DynamicImage::ImageRgba8(frame);
@@ -46,320 +74,287 @@ fn run_detection(capturer: &Window, db: &Database) {
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|best| best.0);
 
+    let mut result = String::new();
+
     for (index, item) in items.iter().enumerate() {
         if let Some(item) = item {
-            info!(
-                "{}\n\t{}\t{}\t{}",
+            result.push_str(&format!(
+                "{}\t{}\t{}\t{}\n",
                 item.drop_name,
                 item.platinum,
                 item.ducats as f32 / 10.0,
                 if Some(index) == best { "<----" } else { "" }
-            );
-        } else {
-            warn!("Unknown item\n\tUnknown");
+            ));
         }
     }
+
+    return result;
+
+    // for (index, item) in items.iter().enumerate() {
+    //     if let Some(item) = item {
+    //         println!(
+    //             "{}\n\t{}\t{}\t{}",
+    //             item.drop_name,
+    //             item.platinum,
+    //             item.ducats as f32 / 10.0,
+    //             if Some(index) == best { "<----" } else { "" }
+    //         );
+    //     } else {
+    //         println!("Unknown item\n\tUnknown");
+    //     }
+    // }
 }
 
-fn log_watcher(path: PathBuf, event_sender: mpsc::Sender<()>) {
-    debug!("Path: {}", path.display());
-    let mut position = File::open(&path)
-        .unwrap_or_else(|_| panic!("Couldn't open file {}", path.display()))
-        .seek(SeekFrom::End(0))
-        .unwrap();
+fn main() {
+    let event_loop = EventLoop::new();
 
-    thread::spawn(move || {
-        debug!("Position: {}", position);
+    let window_builder = WindowBuilder::new()
+        .with_inner_size(LogicalSize::new(1.0, 1.0))
+        .with_position(PhysicalPosition::new(0, 1))
+        .with_visible(true)
+        .with_resizable(true)
+        .with_transparent(true)
+        .with_decorations(false)
+        .with_always_on_top(true)
+        .with_x11_window_type(vec![XWindowType::Notification])
+        .with_title("DO NOT CLOSE THIS WINDOW");
 
-        let (tx, rx) = mpsc::channel();
-        let mut watcher = watcher(tx, Duration::from_millis(100)).unwrap();
-        watcher
-            .watch(&path, RecursiveMode::NonRecursive)
-            .unwrap_or_else(|_| panic!("Failed to open EE.log file: {}", path.display()));
+    let template_builder = ConfigTemplateBuilder::new();
+    let (window, gl_config) = DisplayBuilder::new()
+        .with_window_builder(Some(window_builder))
+        .build(&event_loop, template_builder, |mut configs| {
+            configs.next().unwrap()
+        })
+        .expect("Failed to create main window");
 
-        loop {
-            match rx.recv() {
-                Ok(notify::DebouncedEvent::Write(_)) => {
-                    let mut f = File::open(&path).unwrap();
-                    f.seek(SeekFrom::Start(position)).unwrap();
+    let window = window.unwrap();
 
-                    let mut reward_screen_detected = false;
+    window
+        .set_cursor_grab(winit::window::CursorGrabMode::None)
+        .expect("cannot set cursor grab!");
 
-                    let reader = BufReader::new(f.by_ref());
-                    for line in reader.lines() {
-                        let line = match line {
-                            Ok(line) => line,
-                            Err(err) => {
-                                error!("Error reading line: {}", err);
-                                continue;
-                            }
-                        };
-                        // debug!("> {:?}", line);
-                        if line.contains("Pause countdown done")
-                            || line.contains("Got rewards")
-                            || line.contains("Created /Lotus/Interface/ProjectionRewardChoice.swf")
-                        {
-                            reward_screen_detected = true;
-                        }
-                    }
-
-                    if reward_screen_detected {
-                        info!("Detected, waiting...");
-                        sleep(Duration::from_millis(1500));
-                        event_sender.send(()).unwrap();
-                    }
-
-                    position = f.metadata().unwrap().len();
-                    debug!("Log position: {}", position);
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    error!("Error: {:?}", err);
-                }
-            }
-        }
-    });
-}
-
-fn hotkey_watcher(hotkey: HotKey, event_sender: mpsc::Sender<()>) {
-    debug!("watching hotkey: {hotkey:?}");
-    thread::spawn(move || {
-        let manager = GlobalHotKeyManager::new().unwrap();
-        manager.register(hotkey).unwrap();
-
-        while let Ok(event) = GlobalHotKeyEvent::receiver().recv() {
-            debug!("{:?}", event);
-            if event.state == HotKeyState::Pressed {
-                event_sender.send(()).unwrap();
-            }
-        }
-    });
-}
-
-#[allow(dead_code)]
-fn benchmark() -> Result<(), Box<dyn Error>> {
-    for _ in 0..10 {
-        let image = image::open("input3.png").unwrap();
-        println!("Converted");
-        let text = reward_image_to_reward_names(image, None);
-        println!("got names");
-        let text = text.iter().map(|s| normalize_string(s));
-        println!("{:#?}", text);
-    }
-    // clean up tesseract
-    drop(OCR.lock().unwrap().take());
-    Ok(())
-}
-
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Arguments {
-    /// Path to the `EE.log` file located in the game installation directory
-    ///
-    /// Most likely located at `~/.local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log`
-    game_log_file_path: Option<PathBuf>,
-    /// Warframe Window Name
-    ///
-    /// some systems may require the window name to be specified (e.g. when using gamescope)
-    #[arg(short, long, default_value = "Warframe")]
-    window_name: String,
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let arguments = Arguments::parse();
-    let default_log_path = PathBuf::from_str(&std::env::var("HOME").unwrap()).unwrap().join(PathBuf::from_str(".local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log")?);
-    let log_path = arguments.game_log_file_path.unwrap_or(default_log_path);
-    let window_name = arguments.window_name;
-    let env = Env::default()
-        .filter_or("WFINFO_LOG", "info")
-        .write_style_or("WFINFO_STYLE", "always");
-    Builder::from_env(env)
-        .format_timestamp(None)
-        .format_level(false)
-        .format_module_path(false)
-        .format_target(false)
-        .init();
-
-    let windows = Window::all()?;
-    let Some(warframe_window) = windows.iter().find(|x| x.title() == window_name) else {
-        return Err("Warframe window not found".into());
+    let context_attribs = ContextAttributesBuilder::new().build(Some(window.raw_window_handle()));
+    let context = unsafe {
+        gl_config
+            .display()
+            .create_context(&gl_config, &context_attribs)
+            .expect("Failed to create main context")
     };
 
-    debug!(
-        "Capture source resolution: {:?}x{:?}",
-        warframe_window.width(),
-        warframe_window.height()
+    let size = window.inner_size();
+    let surface_attribs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
+        window.raw_window_handle(),
+        NonZeroU32::new(size.width).unwrap(),
+        NonZeroU32::new(size.height).unwrap(),
     );
+    let surface = unsafe {
+        gl_config
+            .display()
+            .create_window_surface(&gl_config, &surface_attribs)
+            .expect("Failed to create main surface")
+    };
 
-    let (prices, items) = fetch_prices_and_items()?;
-    let db = Database::load_from_file(Some(&prices), Some(&items));
+    let context = context
+        .make_current(&surface)
+        .expect("Failed to make current");
 
-    info!("Loaded database");
+    let glow = unsafe {
+        Context::from_loader_function(|name| {
+            let name = CString::new(name).unwrap();
+            context.display().get_proc_address(&name)
+        })
+    };
 
-    let (event_sender, event_receiver) = channel();
+    let mut imgui = imgui::Context::create();
+    imgui
+        .io_mut()
+        .config_flags
+        .insert(ConfigFlags::DOCKING_ENABLE);
+    imgui
+        .io_mut()
+        .config_flags
+        .insert(ConfigFlags::VIEWPORTS_ENABLE);
+    imgui.io_mut().config_flags.insert(ConfigFlags::NO_MOUSE);
+    imgui.set_ini_filename(None);
 
-    log_watcher(log_path, event_sender.clone());
-    hotkey_watcher("F12".parse()?, event_sender);
+    let mut renderer = Renderer::new(&mut imgui, &window, &glow).expect("Failed to init Renderer");
 
-    while let Ok(()) = event_receiver.recv() {
-        info!("Capturing");
-        run_detection(warframe_window, &db);
-    }
+    let mut last_frame = Instant::now();
 
-    drop(OCR.lock().unwrap().take());
-    Ok(())
-}
+    let mut rewards = String::new();
 
-#[cfg(test)]
-mod test {
-    use std::collections::BTreeMap;
-    use std::fs::read_to_string;
+    let path = std::env::args().nth(1).unwrap();
+    println!("Path: {}", path);
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = watcher(tx, Duration::from_millis(100)).unwrap();
+    watcher
+        .watch(&path, RecursiveMode::NonRecursive)
+        .unwrap_or_else(|_| panic!("Failed to open EE.log file: {path}"));
 
-    use image::io::Reader;
-    use indexmap::IndexMap;
-    use rayon::prelude::*;
-    use tesseract::Tesseract;
-    use wfinfo::ocr::detect_theme;
-    use wfinfo::ocr::extract_parts;
-    use wfinfo::testing::Label;
+    let mut position = File::open(&path).unwrap().seek(SeekFrom::End(0)).unwrap();
+    println!("Position: {}", position);
+    // rewards.push_str(format!("Position: {}", position).as_str());
 
-    use super::*;
+    let mut capturer = Capturer::new(0).unwrap();
+    println!("Capture source resolution: {:?}", capturer.geometry());
 
-    #[test]
-    fn single_image() {
-        let image = Reader::open(format!("test-images/{}.png", 1))
-            .unwrap()
-            .decode()
-            .unwrap();
-        let text = reward_image_to_reward_names(image, None);
-        let text = text.iter().map(|s| normalize_string(s));
-        println!("{:#?}", text);
-        let db = Database::load_from_file(None, None);
-        let items: Vec<_> = text.map(|s| db.find_item(&s, None)).collect();
-        println!("{:#?}", items);
+    run_detection(&mut capturer);
 
-        assert_eq!(
-            items[0].expect("Didn't find an item?").drop_name,
-            "Octavia Prime Systems Blueprint"
-        );
-        assert_eq!(
-            items[1].expect("Didn't find an item?").drop_name,
-            "Octavia Prime Blueprint"
-        );
-        assert_eq!(
-            items[2].expect("Didn't find an item?").drop_name,
-            "Tenora Prime Blueprint"
-        );
-        assert_eq!(
-            items[3].expect("Didn't find an item?").drop_name,
-            "Harrow Prime Systems Blueprint"
-        );
-    }
+    event_loop.run(move |event, window_target, control_flow| {
+        control_flow.set_poll();
 
-    // #[test]
-    #[allow(dead_code)]
-    fn wfi_images_exact() {
-        let labels: IndexMap<String, Label> =
-            serde_json::from_str(&read_to_string("WFI test images/labels.json").unwrap()).unwrap();
-        for (filename, label) in labels {
-            let image = Reader::open("WFI test images/".to_string() + &filename)
-                .unwrap()
-                .decode()
-                .unwrap();
-            let text = reward_image_to_reward_names(image, None);
-            let text: Vec<_> = text.iter().map(|s| normalize_string(s)).collect();
-            println!("{:#?}", text);
+        renderer.handle_event(&mut imgui, &window, &event);
 
-            let db = Database::load_from_file(None, None);
-            let items: Vec<_> = text.iter().map(|s| db.find_item(s, None)).collect();
-            println!("{:#?}", items);
-            println!("{}", filename);
+        match rx.try_recv() {
+            Ok(notify::DebouncedEvent::Write(_)) => {
+                let mut f = File::open(&path).unwrap();
+                f.seek(SeekFrom::Start(position)).unwrap();
 
-            let item_names = items
-                .iter()
-                .map(|item| item.map(|item| item.drop_name.clone()));
+                let mut reward_screen_detected = false;
+                let mut end_of_match_detected = false;
 
-            for (result, expectation) in item_names.zip(label.items) {
-                if expectation.is_empty() {
-                    assert_eq!(result, None)
-                } else {
-                    assert_eq!(result, Some(expectation))
+                let reader = BufReader::new(f.by_ref());
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(line) => line,
+                        Err(err) => {
+                            println!("Error reading line: {}", err);
+                            continue;
+                        }
+                    };
+                    // println!("> {:?}", line);
+                    if line.contains("Pause countdown done")
+                        || line.contains("Got rewards")
+                        || line.contains("Created /Lotus/Interface/ProjectionRewardChoice.swf")
+                    {
+                        reward_screen_detected = true;
+                    }
+                    if line.contains("Created /Lotus/Interface/EndOfMatch.swf") {
+                        end_of_match_detected = true;
+                    }
                 }
+
+                if reward_screen_detected {
+                    println!("Detected, waiting...");
+                    sleep(Duration::from_millis(1500));
+                    println!("Capturing");
+                    rewards.clear();
+                    rewards.push_str(run_detection(&mut capturer).as_str());
+                    println!("rewards: {}", rewards);
+                    window.request_redraw();
+                }
+
+                if end_of_match_detected {
+                    println!("Match ended!");
+                    rewards.clear();
+                    window.request_redraw();
+                }
+
+                position = f.metadata().unwrap().len();
+                println!("Log position: {}", position);
+                // rewards.push_str(format!("Log Position: {}\n", position).as_str());
+            }
+            Ok(_) => {}
+            Err(err) => {
+                // eprintln!("Error: {:?}", err);
             }
         }
-    }
 
-    #[test]
-    fn wfi_images_99_percent() {
-        let labels: BTreeMap<String, Label> =
-            serde_json::from_str(&read_to_string("WFI test images/labels.json").unwrap()).unwrap();
-        let total = labels.len();
-        let success_count: usize = labels
-            .into_par_iter()
-            .map(|(filename, label)| {
-                let image = Reader::open("WFI test images/".to_string() + &filename)
-                    .unwrap()
-                    .decode()
-                    .unwrap();
-                let text = reward_image_to_reward_names(image, None);
-                let text: Vec<_> = text.iter().map(|s| normalize_string(s)).collect();
-                println!("{:#?}", text);
-
-                let db = Database::load_from_file(None, None);
-                let items: Vec<_> = text.iter().map(|s| db.find_item(s, None)).collect();
-                println!("{:#?}", items);
-                println!("{}", filename);
-
-                let item_names = items
-                    .iter()
-                    .map(|item| item.map(|item| item.drop_name.clone()));
-
-                if item_names.zip(label.items).all(|(result, expectation)| {
-                    expectation == result.unwrap_or_else(|| "".to_string())
-                }) {
-                    1
-                } else {
-                    0
-                }
-            })
-            .sum();
-
-        let success_rate = success_count as f32 / total as f32;
-        assert!(success_rate > 0.95, "Success rate: {success_rate}");
-    }
-
-    // #[test]
-    #[allow(dead_code)]
-    fn images() {
-        let tests = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-        for i in tests {
-            let image = Reader::open(format!("test-images/{}.png", i))
-                .unwrap()
-                .decode()
-                .unwrap();
-
-            let theme = detect_theme(&image);
-            println!("Theme: {:?}", theme);
-
-            let parts = extract_parts(&image, theme);
-
-            let mut ocr =
-                Tesseract::new(None, Some("eng")).expect("Could not initialize Tesseract");
-            for part in parts {
-                let buffer = part.as_flat_samples_u8().unwrap();
-                ocr = ocr
-                    .set_frame(
-                        buffer.samples,
-                        part.width() as i32,
-                        part.height() as i32,
-                        3,
-                        3 * part.width() as i32,
-                    )
-                    .expect("Failed to set image");
-                let text = ocr.get_text().expect("Failed to get text");
-                println!("{}", text);
+        match event {
+            winit::event::Event::NewEvents(_) => {
+                let now = Instant::now();
+                imgui.io_mut().update_delta_time(now - last_frame);
+                last_frame = now;
             }
-            println!("=================");
+            winit::event::Event::WindowEvent {
+                window_id,
+                event: WindowEvent::CloseRequested,
+            } if window_id == window.id() => {
+                control_flow.set_exit();
+            }
+            winit::event::Event::WindowEvent {
+                window_id,
+                event: WindowEvent::Resized(new_size),
+            } if window_id == window.id() => {
+                surface.resize(
+                    &context,
+                    NonZeroU32::new(new_size.width).unwrap(),
+                    NonZeroU32::new(new_size.height).unwrap(),
+                );
+            }
+            winit::event::Event::MainEventsCleared => {
+                window.request_redraw();
+            }
+            winit::event::Event::RedrawRequested(_) => {
+                let ui = imgui.frame();
+                if !rewards.trim().is_empty() {
+                    ui.window("RelicRewards")
+                        .size([400.0, 200.0], Condition::FirstUseEver)
+                        .resizable(true)
+                        .focused(false)
+                        .nav_focus(false)
+                        .focus_on_appearing(false)
+                        .draw_background(false)
+                        .bg_alpha(0.5)
+                        .flags(WindowFlags::NO_INPUTS | WindowFlags::NO_NAV_FOCUS)
+                        .build(|| {
+                            ui.text("rewards:");
+                            ui.text(rewards.clone());
+                        });
+                }
+
+                // ui.window("RelicRewards")
+                //     .size([400.0, 200.0], Condition::FirstUseEver)
+                //     .resizable(true)
+                //     .focused(false)
+                //     .nav_focus(false)
+                //     .focus_on_appearing(false)
+                //     .draw_background(false)
+                //     .bg_alpha(0.5)
+                //     .flags(
+                //         WindowFlags::NO_INPUTS
+                //             | WindowFlags::NO_NAV_FOCUS
+                //             | WindowFlags::NO_BACKGROUND,
+                //     )
+                //     .build(|| {
+                //         ui.text("McTesty");
+                //     });
+
+                ui.end_frame_early();
+
+                renderer.prepare_render(&mut imgui, &window);
+
+                imgui.update_platform_windows();
+                renderer
+                    .update_viewports(&mut imgui, window_target, &glow)
+                    .expect("Failed to update viewports");
+
+                let draw_data = imgui.render();
+
+                if let Err(e) = context.make_current(&surface) {
+                    // For some reason make_current randomly throws errors on windows.
+                    // Until the reason for this is found, we just print it out instead of panicing.
+                    eprintln!("Failed to make current: {e}");
+                }
+
+                unsafe {
+                    glow.disable(glow::SCISSOR_TEST);
+                    glow.clear(glow::COLOR_BUFFER_BIT);
+                }
+
+                renderer
+                    .render(&window, &glow, draw_data)
+                    .expect("Failed to render main viewport");
+
+                surface
+                    .swap_buffers(&context)
+                    .expect("Failed to swap buffers");
+
+                renderer
+                    .render_viewports(&glow, &mut imgui)
+                    .expect("Failed to render viewports");
+            }
+            _ => {}
         }
-    }
+    });
 }
