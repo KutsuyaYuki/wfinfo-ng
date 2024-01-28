@@ -48,47 +48,29 @@ use winit::{
 
 use imgui::*;
 
-mod support;
-
-fn run_detection(capturer: &Window, db: &Database) -> String {
+fn run_detection(capturer: &Window, db: &Database) -> Vec<wfinfo::database::Item> {
     let frame = capturer.capture_image().unwrap();
     info!("Captured");
     let image = DynamicImage::ImageRgba8(frame);
     info!("Converted");
     let text = reward_image_to_reward_names(image, None);
     let text = text.iter().map(|s| normalize_string(s));
-    debug!("{:#?}", text);
-
-    let items: Vec<_> = text.map(|s| db.find_item(&s, None)).collect();
-
-    let best = items
-        .iter()
-        .map(|item| {
-            item.map(|item| {
-                item.platinum
-                    .max(item.ducats as f32 / 10.0 + item.platinum / 100.0)
-            })
-            .unwrap_or(0.0)
+    println!("{:#?}", text);
+    let db = Database::load_from_file(None, None);
+    let items: Vec<_> = text
+        .map(move |s| {
+            db.find_item(&s, None)
+                .unwrap_or(&wfinfo::database::Item {
+                    drop_name: ("".to_owned()),
+                    ducats: (0),
+                    name: ("".to_owned()),
+                    platinum: (0.0 as f32),
+                })
+                .to_owned()
         })
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|best| best.0);
+        .collect();
 
-    let mut result = String::new();
-
-    for (index, item) in items.iter().enumerate() {
-        if let Some(item) = item {
-            result.push_str(&format!(
-                "{}\t{}\t{}\t{}\n",
-                item.drop_name,
-                item.platinum,
-                item.ducats as f32 / 10.0,
-                if Some(index) == best { "<----" } else { "" }
-            ));
-        }
-    }
-
-    return result;
+    return items;
 
     // for (index, item) in items.iter().enumerate() {
     //     if let Some(item) = item {
@@ -181,7 +163,10 @@ fn main() {
 
     let mut last_frame = Instant::now();
 
-    let mut rewards = String::new();
+    let mut rewards = String::from("A");
+    let mut items: Vec<wfinfo::database::Item> = Vec::new();
+
+    let mut best: Option<usize> = Some(0 as usize);
 
     let path = std::env::args().nth(1).unwrap();
     println!("Path: {}", path);
@@ -198,7 +183,7 @@ fn main() {
     let mut capturer = Capturer::new(0).unwrap();
     println!("Capture source resolution: {:?}", capturer.geometry());
 
-    run_detection(&mut capturer);
+    // run_detection(&mut capturer);
 
     event_loop.run(move |event, window_target, control_flow| {
         control_flow.set_poll();
@@ -239,7 +224,31 @@ fn main() {
                     sleep(Duration::from_millis(1500));
                     println!("Capturing");
                     rewards.clear();
-                    rewards.push_str(run_detection(&mut capturer).as_str());
+
+                    items = run_detection(&mut capturer).clone();
+
+                    best = items
+                        .iter()
+                        .map(|item| {
+                            item.platinum
+                                .max(item.ducats as f32 / 10.0 + item.platinum / 100.0)
+                        })
+                        .enumerate()
+                        .max_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|best| best.0);
+
+                    let mut result = String::new();
+
+                    for (index, item) in items.iter().enumerate() {
+                        result.push_str(&format!(
+                            "{}\t{}\t{}\t{}\n",
+                            item.drop_name,
+                            item.platinum,
+                            item.ducats as f32 / 10.0,
+                            if Some(index) == best { "<----" } else { "" }
+                        ));
+                    }
+                    rewards.push_str(result.as_str());
                     println!("rewards: {}", rewards);
                     window.request_redraw();
                 }
@@ -247,6 +256,7 @@ fn main() {
                 if end_of_match_detected {
                     println!("Match ended!");
                     rewards.clear();
+                    items.clear();
                     window.request_redraw();
                 }
 
@@ -287,7 +297,7 @@ fn main() {
             }
             winit::event::Event::RedrawRequested(_) => {
                 let ui = imgui.frame();
-                if !rewards.trim().is_empty() {
+                if items.len() > 0 {
                     ui.window("RelicRewards")
                         .size([400.0, 200.0], Condition::FirstUseEver)
                         .resizable(true)
@@ -299,26 +309,35 @@ fn main() {
                         .flags(WindowFlags::NO_INPUTS | WindowFlags::NO_NAV_FOCUS)
                         .build(|| {
                             ui.text("rewards:");
-                            ui.text(rewards.clone());
+                            if let Some(_t) = ui.begin_table_header_with_flags(
+                                "Basic-Table",
+                                [
+                                    TableColumnSetup::new("Name"),
+                                    TableColumnSetup::new("Platinum"),
+                                    TableColumnSetup::new("Ducats"),
+                                ],
+                                TableFlags::BORDERS | TableFlags::SIZING_FIXED_FIT,
+                            ) {
+                                items.sort_by(|a, b| b.platinum.total_cmp(&a.platinum));
+                                for (index, item) in items.iter().enumerate() {
+                                    ui.table_next_column();
+                                    ui.text(item.drop_name.clone());
+
+                                    ui.table_next_column();
+                                    ui.text(format!("{}", item.platinum));
+
+                                    ui.table_next_column();
+                                    ui.text(format!("{}", item.ducats));
+                                    ui.table_next_row();
+                                }
+
+                                // note you MUST call `next_column` at least to START
+                                // Let's walk through a table like it's an iterator...
+
+                                ui.new_line();
+                            }
                         });
                 }
-
-                // ui.window("RelicRewards")
-                //     .size([400.0, 200.0], Condition::FirstUseEver)
-                //     .resizable(true)
-                //     .focused(false)
-                //     .nav_focus(false)
-                //     .focus_on_appearing(false)
-                //     .draw_background(false)
-                //     .bg_alpha(0.5)
-                //     .flags(
-                //         WindowFlags::NO_INPUTS
-                //             | WindowFlags::NO_NAV_FOCUS
-                //             | WindowFlags::NO_BACKGROUND,
-                //     )
-                //     .build(|| {
-                //         ui.text("McTesty");
-                //     });
 
                 ui.end_frame_early();
 

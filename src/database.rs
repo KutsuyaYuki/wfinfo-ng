@@ -95,7 +95,7 @@ impl Database {
             .collect();
 
         if let Some(item) = items.iter_mut().find(|item| item.name == "Forma Blueprint") {
-            item.platinum = 35.0 / 3.0;
+            item.platinum = 0.0;
         };
 
         let relics = filtered_items.relics;
