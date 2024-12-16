@@ -24,7 +24,7 @@ use winit::{
     event::{DeviceEvent, ElementState, KeyboardInput, TouchPhase, VirtualKeyCode},
     event_loop::EventLoopWindowTarget,
     platform::unix::{WindowBuilderExtUnix, XWindowType},
-    window::{CursorIcon, Window, WindowBuilder},
+    window::{CursorIcon, Window, WindowBuilder, UserAttentionType},
 };
 
 const VERTEX_SHADER: &str = include_str!("vertex_shader.glsl");
@@ -707,7 +707,7 @@ impl Renderer {
             .with_resizable(true)
             .with_always_on_top(true)
             .with_transparent(true)
-            .with_x11_window_type(vec![XWindowType::Notification])
+            //.with_x11_window_type(vec![XWindowType::Notification])
             .with_decorations(!viewport.flags.contains(ViewportFlags::NO_DECORATION));
 
         let window = if let Some(glutin_config) = &self.glutin_config {
@@ -723,9 +723,11 @@ impl Renderer {
                 })
                 .map_err(|_| RendererError::WindowCreationFailed)?;
 
+            let windowUnwrapped = window.unwrap();
+            windowUnwrapped.focus_window();
             self.glutin_config = Some(cfg);
 
-            window.unwrap()
+            windowUnwrapped
         };
 
         let glutin_config = self.glutin_config.as_ref().unwrap();

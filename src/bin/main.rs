@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{error::Error, str::FromStr};
@@ -43,12 +44,12 @@ use winit::{
     event::WindowEvent,
     event_loop::EventLoop,
     platform::unix::{WindowBuilderExtUnix, XWindowType},
-    window::WindowBuilder,
+    window::{WindowBuilder,UserAttentionType},
 };
 
 use imgui::*;
 
-fn run_detection(capturer: &Window, db: &Database) -> Vec<wfinfo::database::Item> {
+fn run_detection<'a>(capturer: &'a mut &Window, db: &Database) -> Vec<wfinfo::database::Item> {
     let frame = capturer.capture_image().unwrap();
     info!("Captured");
     let image = DynamicImage::ImageRgba8(frame);
@@ -87,18 +88,39 @@ fn run_detection(capturer: &Window, db: &Database) -> Vec<wfinfo::database::Item
     // }
 }
 
-fn main() {
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Arguments {
+    /// Path to the `EE.log` file located in the game installation directory
+    ///
+    /// Most likely located at `~/.local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log`
+    game_log_file_path: Option<PathBuf>,
+    /// Warframe Window Name
+    ///
+    /// some systems may require the window name to be specified (e.g. when using gamescope)
+    #[arg(short, long, default_value = "Warframe")]
+    window_name: String,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new();
 
+    let arguments = Arguments::parse();
+    let default_log_path = PathBuf::from_str(&std::env::var("HOME").unwrap()).unwrap().join(PathBuf::from_str(".local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log")?);
+    let log_path = arguments.game_log_file_path.unwrap_or(default_log_path);
+    let window_name = arguments.window_name;
+    let env = Env::default()
+        .filter_or("WFINFO_LOG", "info")
+        .write_style_or("WFINFO_STYLE", "always");
     let window_builder = WindowBuilder::new()
-        .with_inner_size(LogicalSize::new(1.0, 1.0))
-        .with_position(PhysicalPosition::new(0, 1))
+        .with_inner_size(LogicalSize::new(400.0, 200.0))
+        .with_position(PhysicalPosition::new(100, 1))
         .with_visible(true)
         .with_resizable(true)
         .with_transparent(true)
         .with_decorations(false)
-        .with_always_on_top(true)
-        .with_x11_window_type(vec![XWindowType::Notification])
+        //.with_always_on_top(true)
+        //.with_x11_window_type(vec![XWindowType::Notification])
         .with_title("DO NOT CLOSE THIS WINDOW");
 
     let template_builder = ConfigTemplateBuilder::new();
@@ -110,6 +132,7 @@ fn main() {
         .expect("Failed to create main window");
 
     let window = window.unwrap();
+    window.focus_window();
 
     window
         .set_cursor_grab(winit::window::CursorGrabMode::None)
@@ -178,12 +201,11 @@ fn main() {
 
     let mut position = File::open(&path).unwrap().seek(SeekFrom::End(0)).unwrap();
     println!("Position: {}", position);
-    // rewards.push_str(format!("Position: {}", position).as_str());
-
-    let mut capturer = Capturer::new(0).unwrap();
-    println!("Capture source resolution: {:?}", capturer.geometry());
 
     // run_detection(&mut capturer);
+
+    let (prices, dbitems) = fetch_prices_and_items()?;
+    let db = Database::load_from_file(Some(&prices), Some(&dbitems));
 
     event_loop.run(move |event, window_target, control_flow| {
         control_flow.set_poll();
@@ -224,8 +246,11 @@ fn main() {
                     sleep(Duration::from_millis(1500));
                     println!("Capturing");
                     rewards.clear();
+                    let windows = Window::all().unwrap();
+                    // rewards.push_str(format!("Position: {}", position).as_str());
+                    let mut warframe_window = windows.iter().find(|x| x.title() == window_name).unwrap();
 
-                    items = run_detection(&mut capturer).clone();
+                    items = run_detection(&mut warframe_window, &db).clone();
 
                     best = items
                         .iter()
@@ -297,9 +322,10 @@ fn main() {
             }
             winit::event::Event::RedrawRequested(_) => {
                 let ui = imgui.frame();
-                if items.len() > 0 {
+                if items.len() >= 0 {
                     ui.window("RelicRewards")
                         .size([400.0, 200.0], Condition::FirstUseEver)
+                        //.position([0.0, 0.0], Condition::FirstUseEver)
                         .resizable(true)
                         .focused(false)
                         .nav_focus(false)
