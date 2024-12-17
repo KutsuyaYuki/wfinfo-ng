@@ -1,26 +1,22 @@
-use std::borrow::Borrow;
-use std::thread::sleep;
-use std::time::Duration;
-use std::{error::Error, str::FromStr};
-use std::{fs::File, thread};
 use std::{
+    borrow::Borrow,
+    error::Error,
+    fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    sync::mpsc::channel,
+    sync::mpsc,
+    thread::sleep,
+    time::Duration
 };
-use std::{path::PathBuf, sync::mpsc};
 
-use clap::Parser;
-use env_logger::{Builder, Env};
-use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use glutin::{display::GetGlDisplay, prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext}, surface::GlSurface};
 use image::DynamicImage;
 use imgui_winit_glow_renderer_viewports::Renderer;
-use log::{debug, error, info, warn};
+use log::info;
 use notify::{watcher, RecursiveMode, Watcher};
-use xcap::Window;
 
 use wfinfo::{
     database::Database,
-    ocr::{normalize_string, reward_image_to_reward_names, OCR},
+    ocr::{normalize_string, reward_image_to_reward_names},
     utils::fetch_prices_and_items,
 };
 
@@ -30,34 +26,181 @@ use glow::{Context, HasContext};
 use glutin::{
     config::ConfigTemplateBuilder,
     context::ContextAttributesBuilder,
-    display::GetGlDisplay,
-    prelude::{
-        GlDisplay, NotCurrentGlContextSurfaceAccessor, PossiblyCurrentContextGlSurfaceAccessor,
-    },
-    surface::{GlSurface, SurfaceAttributesBuilder, WindowSurface},
+    surface::{SurfaceAttributesBuilder, WindowSurface},
 };
 use glutin_winit::DisplayBuilder;
 use imgui::ConfigFlags;
-use raw_window_handle::HasRawWindowHandle;
+use raw_window_handle::HasWindowHandle;
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::WindowEvent,
     event_loop::EventLoop,
-    platform::unix::{WindowBuilderExtUnix, XWindowType},
-    window::{WindowBuilder,UserAttentionType},
 };
 
 use imgui::*;
 
-fn run_detection<'a>(capturer: &'a mut &Window, db: &Database) -> Vec<wfinfo::database::Item> {
-    let frame = capturer.capture_image().unwrap();
+use image::RgbaImage;
+use dbus::{
+    arg::{AppendAll, Iter, IterAppend, PropMap, ReadAll, RefArg, TypeMismatchError, Variant},
+    blocking::Connection,
+    message::{MatchRule, SignalArgs},
+};
+use std::{
+    collections::HashMap,
+    fs::{self},
+    sync::{Arc, Mutex},
+};
+use percent_encoding::percent_decode;
+
+static DBUS_LOCK: Mutex<()> = Mutex::new(());
+use image::open;
+#[derive(Debug)]
+struct OrgFreedesktopPortalRequestResponse {
+    status: u32,
+    results: PropMap,
+}
+
+impl AppendAll for OrgFreedesktopPortalRequestResponse {
+    fn append(&self, i: &mut IterAppend) {
+        RefArg::append(&self.status, i);
+        RefArg::append(&self.results, i);
+    }
+}
+
+impl ReadAll for OrgFreedesktopPortalRequestResponse {
+    fn read(i: &mut Iter) -> Result<Self, TypeMismatchError> {
+        Ok(OrgFreedesktopPortalRequestResponse {
+            status: i.read()?,
+            results: i.read()?,
+        })
+    }
+}
+
+impl SignalArgs for OrgFreedesktopPortalRequestResponse {
+    const NAME: &'static str = "Response";
+    const INTERFACE: &'static str = "org.freedesktop.portal.Request";
+}
+fn png_to_rgba_image(
+    filename: &String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> xcap::XCapResult<RgbaImage> {
+    let mut dynamic_image = open(filename)?;
+    dynamic_image = dynamic_image.crop(x as u32, y as u32, width as u32, height as u32);
+    Ok(dynamic_image.to_rgba8())
+}
+fn org_freedesktop_portal_screenshot(
+    conn: &Connection,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> xcap::XCapResult<RgbaImage> {
+    let status: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+    let status_res = status.clone();
+    let path: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let path_res = path.clone();
+
+    let match_rule = MatchRule::new_signal("org.freedesktop.portal.Request", "Response");
+    conn.add_match(
+        match_rule,
+        move |response: OrgFreedesktopPortalRequestResponse, _conn, _msg| {
+            if let Ok(mut status) = status.lock() {
+                *status = Some(response.status);
+            }
+
+            let uri = response.results.get("uri").and_then(|str| str.as_str());
+            if let (Some(uri_str), Ok(mut path)) = (uri, path.lock()) {
+                *path = uri_str[7..].to_string();
+            }
+
+            true
+        },
+    )?;
+
+    let proxy = conn.with_proxy(
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        Duration::from_millis(10000),
+    );
+
+    let mut options: PropMap = HashMap::new();
+    options.insert(
+        String::from("handle_token"),
+        Variant(Box::new(String::from("1234"))),
+    );
+    options.insert(String::from("modal"), Variant(Box::new(true)));
+    options.insert(String::from("interactive"), Variant(Box::new(false)));
+
+    proxy.method_call::<(), (&str, PropMap), &str, &str>(
+        "org.freedesktop.portal.Screenshot",
+        "Screenshot",
+        ("", options),
+    )?;
+
+    // wait 60 seconds for user interaction
+    for _ in 0..60 {
+        let result = conn.process(Duration::from_millis(1000))?;
+        let status = status_res
+            .lock()
+            .map_err(|_| xcap::XCapError::new("Get status lock failed"))?;
+
+        if result && status.is_some() {
+            break;
+        }
+    }
+
+    let status = status_res
+        .lock()
+        .map_err(|_| xcap::XCapError::new("Get status lock failed"))?;
+    let status = *status;
+
+    let path = path_res
+        .lock()
+        .map_err(|_| xcap::XCapError::new("Get path lock failed"))?;
+    let path = &*path;
+
+    if status.ne(&Some(0)) || path.is_empty() {
+        if !path.is_empty() {
+            fs::remove_file(path)?;
+        }
+        return Err(xcap::XCapError::new("Screenshot failed or canceled"));
+    }
+
+    let filename = percent_decode(path.as_bytes()).decode_utf8()?.to_string();
+    let rgba_image = png_to_rgba_image(&filename, x, y, width, height)?;
+
+    fs::remove_file(&filename)?;
+
+    Ok(rgba_image)
+}
+
+pub fn wayland_capture(impl_monitor: &xcap::Monitor) -> xcap::XCapResult<RgbaImage> {
+    let x = ((impl_monitor.x() as f32) * impl_monitor.scale_factor()) as i32;
+    let y = ((impl_monitor.y() as f32) * impl_monitor.scale_factor()) as i32;
+    let width = ((impl_monitor.width() as f32) * impl_monitor.scale_factor()) as i32;
+    let height = ((impl_monitor.height() as f32) * impl_monitor.scale_factor()) as i32;
+
+    let lock = DBUS_LOCK.lock();
+
+    let conn = Connection::new_session()?;
+    let res = org_freedesktop_portal_screenshot(&conn, x, y, width, height);
+
+    drop(lock);
+
+    res
+}
+
+fn run_detection(monitor: &xcap::Monitor, db: &Database) -> Vec<wfinfo::database::Item> {
+    let frame = wayland_capture(monitor).unwrap();
     info!("Captured");
     let image = DynamicImage::ImageRgba8(frame);
     info!("Converted");
     let text = reward_image_to_reward_names(image, None);
     let text = text.iter().map(|s| normalize_string(s));
     println!("{:#?}", text);
-    let db = Database::load_from_file(None, None);
     let items: Vec<_> = text
         .map(move |s| {
             db.find_item(&s, None)
@@ -72,73 +215,38 @@ fn run_detection<'a>(capturer: &'a mut &Window, db: &Database) -> Vec<wfinfo::da
         .collect();
 
     return items;
-
-    // for (index, item) in items.iter().enumerate() {
-    //     if let Some(item) = item {
-    //         println!(
-    //             "{}\n\t{}\t{}\t{}",
-    //             item.drop_name,
-    //             item.platinum,
-    //             item.ducats as f32 / 10.0,
-    //             if Some(index) == best { "<----" } else { "" }
-    //         );
-    //     } else {
-    //         println!("Unknown item\n\tUnknown");
-    //     }
-    // }
-}
-
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Arguments {
-    /// Path to the `EE.log` file located in the game installation directory
-    ///
-    /// Most likely located at `~/.local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log`
-    game_log_file_path: Option<PathBuf>,
-    /// Warframe Window Name
-    ///
-    /// some systems may require the window name to be specified (e.g. when using gamescope)
-    #[arg(short, long, default_value = "Warframe")]
-    window_name: String,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let event_loop = EventLoop::new();
-
-    let arguments = Arguments::parse();
-    let default_log_path = PathBuf::from_str(&std::env::var("HOME").unwrap()).unwrap().join(PathBuf::from_str(".local/share/Steam/steamapps/compatdata/230410/pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log")?);
-    let log_path = arguments.game_log_file_path.unwrap_or(default_log_path);
-    let window_name = arguments.window_name;
-    let env = Env::default()
-        .filter_or("WFINFO_LOG", "info")
-        .write_style_or("WFINFO_STYLE", "always");
-    let window_builder = WindowBuilder::new()
+    let event_loop = EventLoop::new().unwrap();
+    let window_builder = winit::window::Window::default_attributes()
         .with_inner_size(LogicalSize::new(400.0, 200.0))
-        .with_position(PhysicalPosition::new(100, 1))
+        .with_position(PhysicalPosition::new(1, 1))
         .with_visible(true)
         .with_resizable(true)
         .with_transparent(true)
         .with_decorations(false)
-        //.with_always_on_top(true)
+        .with_maximized(true)
         //.with_x11_window_type(vec![XWindowType::Notification])
         .with_title("DO NOT CLOSE THIS WINDOW");
 
     let template_builder = ConfigTemplateBuilder::new();
     let (window, gl_config) = DisplayBuilder::new()
-        .with_window_builder(Some(window_builder))
+        .with_window_attributes(Some(window_builder))
         .build(&event_loop, template_builder, |mut configs| {
             configs.next().unwrap()
         })
         .expect("Failed to create main window");
 
     let window = window.unwrap();
+
     window.focus_window();
 
     window
         .set_cursor_grab(winit::window::CursorGrabMode::None)
         .expect("cannot set cursor grab!");
 
-    let context_attribs = ContextAttributesBuilder::new().build(Some(window.raw_window_handle()));
+    let context_attribs = ContextAttributesBuilder::new().build(Some(window.window_handle()?.as_raw()));
     let context = unsafe {
         gl_config
             .display()
@@ -148,7 +256,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let size = window.inner_size();
     let surface_attribs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
-        window.raw_window_handle(),
+        window.window_handle()?.as_raw(),
         NonZeroU32::new(size.width).unwrap(),
         NonZeroU32::new(size.height).unwrap(),
     );
@@ -186,10 +294,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut last_frame = Instant::now();
 
-    let mut rewards = String::from("A");
     let mut items: Vec<wfinfo::database::Item> = Vec::new();
-
-    let mut best: Option<usize> = Some(0 as usize);
 
     let path = std::env::args().nth(1).unwrap();
     println!("Path: {}", path);
@@ -202,13 +307,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut position = File::open(&path).unwrap().seek(SeekFrom::End(0)).unwrap();
     println!("Position: {}", position);
 
-    // run_detection(&mut capturer);
+    let monitors = xcap::Monitor::all().unwrap();
 
     let (prices, dbitems) = fetch_prices_and_items()?;
     let db = Database::load_from_file(Some(&prices), Some(&dbitems));
 
-    event_loop.run(move |event, window_target, control_flow| {
-        control_flow.set_poll();
+    let _ = event_loop.run(move |event, window_target | {
+        window_target.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
         renderer.handle_event(&mut imgui, &window, &event);
 
@@ -229,11 +334,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             continue;
                         }
                     };
-                    // println!("> {:?}", line);
                     if line.contains("Pause countdown done")
                         || line.contains("Got rewards")
                         || line.contains("Created /Lotus/Interface/ProjectionRewardChoice.swf")
                     {
+                        println!("> {:?}", line);
                         reward_screen_detected = true;
                     }
                     if line.contains("Created /Lotus/Interface/EndOfMatch.swf") {
@@ -245,14 +350,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     println!("Detected, waiting...");
                     sleep(Duration::from_millis(1500));
                     println!("Capturing");
-                    rewards.clear();
-                    let windows = Window::all().unwrap();
-                    // rewards.push_str(format!("Position: {}", position).as_str());
-                    let mut warframe_window = windows.iter().find(|x| x.title() == window_name).unwrap();
+                    let mut rewards = String::new();
 
-                    items = run_detection(&mut warframe_window, &db).clone();
+                    items = run_detection(monitors[0].borrow(), &db).clone();
 
-                    best = items
+                    let best = items
                         .iter()
                         .map(|item| {
                             item.platinum
@@ -260,7 +362,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         })
                         .enumerate()
                         .max_by(|a, b| a.1.total_cmp(&b.1))
-                        .map(|best| best.0);
+                        .map(|b: (usize, f32)| b.0);
 
                     let mut result = String::new();
 
@@ -280,18 +382,16 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 if end_of_match_detected {
                     println!("Match ended!");
-                    rewards.clear();
                     items.clear();
                     window.request_redraw();
                 }
 
                 position = f.metadata().unwrap().len();
-                println!("Log position: {}", position);
-                // rewards.push_str(format!("Log Position: {}\n", position).as_str());
+                info!("Log position: {}", position);
             }
             Ok(_) => {}
-            Err(err) => {
-                // eprintln!("Error: {:?}", err);
+            Err(_err) => {
+                //eprintln!("Error: {:?}", err);
             }
         }
 
@@ -305,7 +405,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 window_id,
                 event: WindowEvent::CloseRequested,
             } if window_id == window.id() => {
-                control_flow.set_exit();
+                window_target.set_control_flow(winit::event_loop::ControlFlow::Poll);
             }
             winit::event::Event::WindowEvent {
                 window_id,
@@ -317,22 +417,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     NonZeroU32::new(new_size.height).unwrap(),
                 );
             }
-            winit::event::Event::MainEventsCleared => {
+            winit::event::Event::AboutToWait => {
                 window.request_redraw();
-            }
-            winit::event::Event::RedrawRequested(_) => {
+                window.set_maximized(false);
                 let ui = imgui.frame();
-                if items.len() >= 0 {
+                if items.len() > 0 {
                     ui.window("RelicRewards")
                         .size([400.0, 200.0], Condition::FirstUseEver)
-                        //.position([0.0, 0.0], Condition::FirstUseEver)
+                        .position([0.0, 0.0], Condition::FirstUseEver)
                         .resizable(true)
                         .focused(false)
                         .nav_focus(false)
                         .focus_on_appearing(false)
                         .draw_background(false)
+                        .bring_to_front_on_focus(true)
                         .bg_alpha(0.5)
                         .flags(WindowFlags::NO_INPUTS | WindowFlags::NO_NAV_FOCUS)
+                        .nav_inputs(false)
                         .build(|| {
                             ui.text("rewards:");
                             if let Some(_t) = ui.begin_table_header_with_flags(
@@ -345,7 +446,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 TableFlags::BORDERS | TableFlags::SIZING_FIXED_FIT,
                             ) {
                                 items.sort_by(|a, b| b.platinum.total_cmp(&a.platinum));
-                                for (index, item) in items.iter().enumerate() {
+                                for (_index, item) in items.iter().enumerate() {
                                     ui.table_next_column();
                                     ui.text(item.drop_name.clone());
 
@@ -356,10 +457,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     ui.text(format!("{}", item.ducats));
                                     ui.table_next_row();
                                 }
-
-                                // note you MUST call `next_column` at least to START
-                                // Let's walk through a table like it's an iterator...
-
                                 ui.new_line();
                             }
                         });
@@ -402,4 +499,5 @@ fn main() -> Result<(), Box<dyn Error>> {
             _ => {}
         }
     });
+    Ok(())
 }

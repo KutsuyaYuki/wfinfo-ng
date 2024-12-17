@@ -12,19 +12,15 @@ use glutin::{
     config::ConfigTemplateBuilder,
     context::{ContextAttributesBuilder, NotCurrentContext},
     display::GetGlDisplay,
-    prelude::{GlDisplay, NotCurrentGlContextSurfaceAccessor, PossiblyCurrentGlContext},
+    prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext},
     surface::{GlSurface, Surface, SurfaceAttributesBuilder, WindowSurface},
 };
 use glutin_winit::DisplayBuilder;
-use imgui::{BackendFlags, ConfigFlags, Id, Key, MouseButton, ViewportFlags};
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use imgui::{BackendFlags, ConfigFlags, Id, MouseButton, ViewportFlags};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use thiserror::Error;
 use winit::{
-    dpi::{PhysicalPosition, PhysicalSize},
-    event::{DeviceEvent, ElementState, KeyboardInput, TouchPhase, VirtualKeyCode},
-    event_loop::EventLoopWindowTarget,
-    platform::unix::{WindowBuilderExtUnix, XWindowType},
-    window::{CursorIcon, Window, WindowBuilder, UserAttentionType},
+    dpi::{PhysicalPosition, PhysicalSize}, event::{ElementState, TouchPhase}, event_loop::ActiveEventLoop, window::{CursorIcon, Window}
 };
 
 const VERTEX_SHADER: &str = include_str!("vertex_shader.glsl");
@@ -175,7 +171,7 @@ impl GlObjects {
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                Some(font_pixels),
+                glow::PixelUnpackData::Slice(Some(font_pixels)),
             );
 
             tex
@@ -346,8 +342,8 @@ impl Renderer {
 
         // there is no good way to handle viewports on wayland,
         // so we disable them
-        match main_window.raw_window_handle() {
-            RawWindowHandle::Wayland(_) => {}
+        match main_window.window_handle().map(|o| o.as_raw()) {
+            Ok(RawWindowHandle::Wayland(_)) => {}
             _ => {
                 io.backend_flags
                     .insert(BackendFlags::PLATFORM_HAS_VIEWPORTS);
@@ -488,46 +484,9 @@ impl Renderer {
                     winit::event::WindowEvent::CloseRequested if window_id != main_window.id() => {
                         viewport.platform_request_close = true;
                     }
-                    winit::event::WindowEvent::ReceivedCharacter(c) => {
-                        imgui.io_mut().add_input_character(c);
-                    }
                     winit::event::WindowEvent::Focused(f) => unsafe {
                         (*(viewport.platform_user_data.cast::<ViewportData>())).focus = f;
                     },
-                    winit::event::WindowEvent::KeyboardInput {
-                        input:
-                            KeyboardInput {
-                                virtual_keycode: Some(key),
-                                state,
-                                ..
-                            },
-                        ..
-                    } => {
-                        let pressed = state == ElementState::Pressed;
-
-                        // We map both left and right ctrl to `ModCtrl`, etc.
-                        // imgui is told both "left control is pressed" and
-                        // "consider the control key is pressed". Allows
-                        // applications to use either general "ctrl" or a
-                        // specific key. Same applies to other modifiers.
-                        // https://github.com/ocornut/imgui/issues/5047
-                        handle_key_modifier(imgui.io_mut(), key, pressed);
-
-                        // Add main key event
-                        if let Some(key) = to_imgui_key(key) {
-                            imgui.io_mut().add_key_event(key, pressed);
-                        }
-                    }
-                    winit::event::WindowEvent::ModifiersChanged(modifiers) => {
-                        imgui
-                            .io_mut()
-                            .add_key_event(Key::ModShift, modifiers.shift());
-                        imgui.io_mut().add_key_event(Key::ModCtrl, modifiers.ctrl());
-                        imgui.io_mut().add_key_event(Key::ModAlt, modifiers.alt());
-                        imgui
-                            .io_mut()
-                            .add_key_event(Key::ModSuper, modifiers.logo());
-                    }
                     winit::event::WindowEvent::CursorMoved { position, .. } => {
                         if imgui
                             .io()
@@ -582,27 +541,14 @@ impl Renderer {
                     _ => {}
                 }
             }
-            winit::event::Event::DeviceEvent {
-                event:
-                    DeviceEvent::Key(KeyboardInput {
-                        virtual_keycode: Some(key),
-                        state: ElementState::Released,
-                        ..
-                    }),
-                ..
-            } => {
-                if let Some(key) = to_imgui_key(key) {
-                    imgui.io_mut().add_key_event(key, false);
-                }
-            }
             _ => {}
         }
     }
 
-    pub fn update_viewports<T>(
+    pub fn update_viewports(
         &mut self,
         imgui: &mut imgui::Context,
-        window_target: &EventLoopWindowTarget<T>,
+        window_target: &ActiveEventLoop,
         glow: &glow::Context,
     ) -> Result<(), RendererError> {
         loop {
@@ -631,13 +577,14 @@ impl Renderer {
                 }
                 ViewportEvent::SetSize(id, size) => {
                     if let Some((_, _, _, wnd)) = self.extra_windows.get(&id) {
-                        wnd.set_inner_size(PhysicalSize::new(size[0], size[1]));
+                        // wnd.set_inner_size(PhysicalSize::new(size[0], size[1]));
+                        wnd.set_min_inner_size(Some(PhysicalSize::new(size[0], size[1])));
                     }
                 }
                 ViewportEvent::SetVisible(id) => {
                     if let Some((_, _, _, wnd)) = self.extra_windows.get(&id) {
                         wnd.set_visible(true);
-                        wnd.set_always_on_top(true);
+                        wnd.request_user_attention(None);
                     }
                 }
                 ViewportEvent::SetFocus(id) => {
@@ -665,7 +612,7 @@ impl Renderer {
             imgui::MouseCursor::ResizeEW => winit::window::CursorIcon::EwResize,
             imgui::MouseCursor::ResizeNESW => winit::window::CursorIcon::NeswResize,
             imgui::MouseCursor::ResizeNWSE => winit::window::CursorIcon::NwseResize,
-            imgui::MouseCursor::Hand => winit::window::CursorIcon::Hand,
+            imgui::MouseCursor::Hand => winit::window::CursorIcon::Grab,
             imgui::MouseCursor::NotAllowed => winit::window::CursorIcon::NotAllowed,
         }
     }
@@ -675,10 +622,10 @@ impl Renderer {
             let cursor = Self::to_winit_cursor(cursor);
 
             if self.last_cursor != cursor {
-                main_window.set_cursor_icon(cursor);
+                main_window.set_cursor(cursor);
 
                 for (_, _, _, wnd) in self.extra_windows.values() {
-                    wnd.set_cursor_icon(cursor);
+                    wnd.set_cursor(cursor);
                 }
 
                 self.last_cursor = cursor;
@@ -686,10 +633,10 @@ impl Renderer {
         }
     }
 
-    fn create_extra_window<T>(
+    fn create_extra_window(
         &mut self,
         viewport: &mut imgui::Viewport,
-        window_target: &EventLoopWindowTarget<T>,
+        window_target: &ActiveEventLoop,
         glow: &glow::Context,
     ) -> Result<
         (
@@ -700,12 +647,11 @@ impl Renderer {
         ),
         RendererError,
     > {
-        let window_builder = WindowBuilder::new()
+        let window_builder = Window::default_attributes()
             .with_position(PhysicalPosition::new(viewport.pos[0], viewport.pos[1]))
             .with_inner_size(PhysicalSize::new(viewport.size[0], viewport.size[1]))
             .with_visible(false)
             .with_resizable(true)
-            .with_always_on_top(true)
             .with_transparent(true)
             //.with_x11_window_type(vec![XWindowType::Notification])
             .with_decorations(!viewport.flags.contains(ViewportFlags::NO_DECORATION));
@@ -717,23 +663,23 @@ impl Renderer {
             let template_builder = ConfigTemplateBuilder::new();
 
             let (window, cfg) = DisplayBuilder::new()
-                .with_window_builder(Some(window_builder))
+                .with_window_attributes(Some(window_builder))
                 .build(window_target, template_builder, |mut configs| {
                     configs.next().unwrap()
                 })
                 .map_err(|_| RendererError::WindowCreationFailed)?;
 
-            let windowUnwrapped = window.unwrap();
-            windowUnwrapped.focus_window();
+            let window_unwrapped = window.unwrap();
+            window_unwrapped.focus_window();
             self.glutin_config = Some(cfg);
 
-            windowUnwrapped
+            window_unwrapped
         };
 
         let glutin_config = self.glutin_config.as_ref().unwrap();
 
         let context_attribs =
-            ContextAttributesBuilder::new().build(Some(window.raw_window_handle()));
+            ContextAttributesBuilder::new().build(Some(window.window_handle().unwrap().as_raw()));
         let context = unsafe {
             glutin_config
                 .display()
@@ -742,7 +688,7 @@ impl Renderer {
         };
 
         let surface_attribs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
-            window.raw_window_handle(),
+            window.window_handle().unwrap().as_raw(),
             NonZeroU32::new(viewport.size[0] as u32).unwrap(),
             NonZeroU32::new(viewport.size[1] as u32).unwrap(),
         );
@@ -918,18 +864,6 @@ struct PlatformBackend {
     event_queue: Rc<RefCell<VecDeque<ViewportEvent>>>,
 }
 
-fn handle_key_modifier(io: &mut imgui::Io, key: VirtualKeyCode, down: bool) {
-    if key == VirtualKeyCode::LShift || key == VirtualKeyCode::RShift {
-        io.add_key_event(imgui::Key::ModShift, down);
-    } else if key == VirtualKeyCode::LControl || key == VirtualKeyCode::RControl {
-        io.add_key_event(imgui::Key::ModCtrl, down);
-    } else if key == VirtualKeyCode::LAlt || key == VirtualKeyCode::RAlt {
-        io.add_key_event(imgui::Key::ModAlt, down);
-    } else if key == VirtualKeyCode::LWin || key == VirtualKeyCode::RWin {
-        io.add_key_event(imgui::Key::ModSuper, down);
-    }
-}
-
 impl imgui::PlatformViewportBackend for PlatformBackend {
     fn create_window(&mut self, viewport: &mut imgui::Viewport) {
         viewport.platform_user_data = Box::into_raw(Box::new(ViewportData {
@@ -1033,117 +967,6 @@ impl imgui::RendererViewportBackend for RendererBackend {
     fn render_window(&mut self, _viewport: &mut imgui::Viewport) {}
 
     fn swap_buffers(&mut self, _viewport: &mut imgui::Viewport) {}
-}
-
-fn to_imgui_key(keycode: VirtualKeyCode) -> Option<Key> {
-    match keycode {
-        VirtualKeyCode::Tab => Some(Key::Tab),
-        VirtualKeyCode::Left => Some(Key::LeftArrow),
-        VirtualKeyCode::Right => Some(Key::RightArrow),
-        VirtualKeyCode::Up => Some(Key::UpArrow),
-        VirtualKeyCode::Down => Some(Key::DownArrow),
-        VirtualKeyCode::PageUp => Some(Key::PageUp),
-        VirtualKeyCode::PageDown => Some(Key::PageDown),
-        VirtualKeyCode::Home => Some(Key::Home),
-        VirtualKeyCode::End => Some(Key::End),
-        VirtualKeyCode::Insert => Some(Key::Insert),
-        VirtualKeyCode::Delete => Some(Key::Delete),
-        VirtualKeyCode::Back => Some(Key::Backspace),
-        VirtualKeyCode::Space => Some(Key::Space),
-        VirtualKeyCode::Return => Some(Key::Enter),
-        VirtualKeyCode::Escape => Some(Key::Escape),
-        VirtualKeyCode::LControl => Some(Key::LeftCtrl),
-        VirtualKeyCode::LShift => Some(Key::LeftShift),
-        VirtualKeyCode::LAlt => Some(Key::LeftAlt),
-        VirtualKeyCode::LWin => Some(Key::LeftSuper),
-        VirtualKeyCode::RControl => Some(Key::RightCtrl),
-        VirtualKeyCode::RShift => Some(Key::RightShift),
-        VirtualKeyCode::RAlt => Some(Key::RightAlt),
-        VirtualKeyCode::RWin => Some(Key::RightSuper),
-        //VirtualKeyCode::Menu => Some(Key::Menu), // TODO: find out if there is a Menu key in winit
-        VirtualKeyCode::Key0 => Some(Key::Alpha0),
-        VirtualKeyCode::Key1 => Some(Key::Alpha1),
-        VirtualKeyCode::Key2 => Some(Key::Alpha2),
-        VirtualKeyCode::Key3 => Some(Key::Alpha3),
-        VirtualKeyCode::Key4 => Some(Key::Alpha4),
-        VirtualKeyCode::Key5 => Some(Key::Alpha5),
-        VirtualKeyCode::Key6 => Some(Key::Alpha6),
-        VirtualKeyCode::Key7 => Some(Key::Alpha7),
-        VirtualKeyCode::Key8 => Some(Key::Alpha8),
-        VirtualKeyCode::Key9 => Some(Key::Alpha9),
-        VirtualKeyCode::A => Some(Key::A),
-        VirtualKeyCode::B => Some(Key::B),
-        VirtualKeyCode::C => Some(Key::C),
-        VirtualKeyCode::D => Some(Key::D),
-        VirtualKeyCode::E => Some(Key::E),
-        VirtualKeyCode::F => Some(Key::F),
-        VirtualKeyCode::G => Some(Key::G),
-        VirtualKeyCode::H => Some(Key::H),
-        VirtualKeyCode::I => Some(Key::I),
-        VirtualKeyCode::J => Some(Key::J),
-        VirtualKeyCode::K => Some(Key::K),
-        VirtualKeyCode::L => Some(Key::L),
-        VirtualKeyCode::M => Some(Key::M),
-        VirtualKeyCode::N => Some(Key::N),
-        VirtualKeyCode::O => Some(Key::O),
-        VirtualKeyCode::P => Some(Key::P),
-        VirtualKeyCode::Q => Some(Key::Q),
-        VirtualKeyCode::R => Some(Key::R),
-        VirtualKeyCode::S => Some(Key::S),
-        VirtualKeyCode::T => Some(Key::T),
-        VirtualKeyCode::U => Some(Key::U),
-        VirtualKeyCode::V => Some(Key::V),
-        VirtualKeyCode::W => Some(Key::W),
-        VirtualKeyCode::X => Some(Key::X),
-        VirtualKeyCode::Y => Some(Key::Y),
-        VirtualKeyCode::Z => Some(Key::Z),
-        VirtualKeyCode::F1 => Some(Key::F1),
-        VirtualKeyCode::F2 => Some(Key::F2),
-        VirtualKeyCode::F3 => Some(Key::F3),
-        VirtualKeyCode::F4 => Some(Key::F4),
-        VirtualKeyCode::F5 => Some(Key::F5),
-        VirtualKeyCode::F6 => Some(Key::F6),
-        VirtualKeyCode::F7 => Some(Key::F7),
-        VirtualKeyCode::F8 => Some(Key::F8),
-        VirtualKeyCode::F9 => Some(Key::F9),
-        VirtualKeyCode::F10 => Some(Key::F10),
-        VirtualKeyCode::F11 => Some(Key::F11),
-        VirtualKeyCode::F12 => Some(Key::F12),
-        VirtualKeyCode::Apostrophe => Some(Key::Apostrophe),
-        VirtualKeyCode::Comma => Some(Key::Comma),
-        VirtualKeyCode::Minus => Some(Key::Minus),
-        VirtualKeyCode::Period => Some(Key::Period),
-        VirtualKeyCode::Slash => Some(Key::Slash),
-        VirtualKeyCode::Semicolon => Some(Key::Semicolon),
-        VirtualKeyCode::Equals => Some(Key::Equal),
-        VirtualKeyCode::LBracket => Some(Key::LeftBracket),
-        VirtualKeyCode::Backslash => Some(Key::Backslash),
-        VirtualKeyCode::RBracket => Some(Key::RightBracket),
-        VirtualKeyCode::Grave => Some(Key::GraveAccent),
-        VirtualKeyCode::Capital => Some(Key::CapsLock),
-        VirtualKeyCode::Scroll => Some(Key::ScrollLock),
-        VirtualKeyCode::Numlock => Some(Key::NumLock),
-        VirtualKeyCode::Snapshot => Some(Key::PrintScreen),
-        VirtualKeyCode::Pause => Some(Key::Pause),
-        VirtualKeyCode::Numpad0 => Some(Key::Keypad0),
-        VirtualKeyCode::Numpad1 => Some(Key::Keypad1),
-        VirtualKeyCode::Numpad2 => Some(Key::Keypad2),
-        VirtualKeyCode::Numpad3 => Some(Key::Keypad3),
-        VirtualKeyCode::Numpad4 => Some(Key::Keypad4),
-        VirtualKeyCode::Numpad5 => Some(Key::Keypad5),
-        VirtualKeyCode::Numpad6 => Some(Key::Keypad6),
-        VirtualKeyCode::Numpad7 => Some(Key::Keypad7),
-        VirtualKeyCode::Numpad8 => Some(Key::Keypad8),
-        VirtualKeyCode::Numpad9 => Some(Key::Keypad9),
-        VirtualKeyCode::NumpadDecimal => Some(Key::KeypadDecimal),
-        VirtualKeyCode::NumpadDivide => Some(Key::KeypadDivide),
-        VirtualKeyCode::NumpadMultiply => Some(Key::KeypadMultiply),
-        VirtualKeyCode::NumpadSubtract => Some(Key::KeypadSubtract),
-        VirtualKeyCode::NumpadAdd => Some(Key::KeypadAdd),
-        VirtualKeyCode::NumpadEnter => Some(Key::KeypadEnter),
-        VirtualKeyCode::NumpadEquals => Some(Key::KeypadEqual),
-        _ => None,
-    }
 }
 
 fn to_imgui_mouse_button(button: winit::event::MouseButton) -> Option<MouseButton> {

@@ -9,7 +9,6 @@ use image::{DynamicImage, GenericImageView, Pixel, Rgb};
 use log::debug;
 
 use crate::theme::Theme;
-use winit::{event_loop::EventLoop, window::WindowBuilder};
 
 const PIXEL_REWARD_WIDTH: f32 = 968.0;
 const PIXEL_REWARD_HEIGHT: f32 = 235.0;
@@ -18,17 +17,10 @@ const PIXEL_REWARD_LINE_HEIGHT: f32 = 48.0;
 
 pub fn detect_theme(image: &DynamicImage) -> Theme {
     // Get the size of primary monitor
-    let event_loop = EventLoop::new();
-    let primary_monitor_size = WindowBuilder::new()
-        .with_visible(false)
-        .build(&event_loop)
-        .unwrap()
-        .primary_monitor()
-        .expect("Unable to get primary monitor")
-        .size();
+    let monitors = xcap::Monitor::all().unwrap();
 
-    let primary_width = primary_monitor_size.width as f32;
-    let primary_height = primary_monitor_size.height as f32;
+    let primary_width = monitors[0].width() as f32;
+    let primary_height = monitors[0].height() as f32;
 
     let aspect_ratio = Fraction::from(primary_width / primary_height);
     let primary_width_aspect = aspect_ratio.numer().unwrap().to_owned() as u32;
