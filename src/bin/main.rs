@@ -140,8 +140,8 @@ fn org_freedesktop_portal_screenshot(
         ("", options),
     )?;
 
-    // wait 60 seconds for user interaction
-    for _ in 0..60 {
+    // wait 30 seconds for user interaction
+    for _ in 0..30 {
         let result = conn.process(Duration::from_millis(1000))?;
         let status = status_res
             .lock()
@@ -336,7 +336,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     };
                     if line.contains("Pause countdown done")
                         || line.contains("Got rewards")
-                        || line.contains("Created /Lotus/Interface/ProjectionRewardChoice.swf")
+                        //|| line.contains("Created /Lotus/Interface/ProjectionRewardChoice.swf")
                     {
                         println!("> {:?}", line);
                         reward_screen_detected = true;
