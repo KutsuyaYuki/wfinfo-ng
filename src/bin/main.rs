@@ -42,7 +42,7 @@ use imgui::*;
 use image::RgbaImage;
 use dbus::{
     arg::{AppendAll, Iter, IterAppend, PropMap, ReadAll, RefArg, TypeMismatchError, Variant},
-    blocking::Connection,
+    blocking::{Connection, Proxy},
     message::{MatchRule, SignalArgs},
 };
 use std::{
@@ -91,8 +91,10 @@ fn png_to_rgba_image(
     dynamic_image = dynamic_image.crop(x as u32, y as u32, width as u32, height as u32);
     Ok(dynamic_image.to_rgba8())
 }
+
 fn org_freedesktop_portal_screenshot(
     conn: &Connection,
+    proxy: &Proxy<'_, &Connection>,
     x: i32,
     y: i32,
     width: i32,
@@ -119,12 +121,6 @@ fn org_freedesktop_portal_screenshot(
             true
         },
     )?;
-
-    let proxy = conn.with_proxy(
-        "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop",
-        Duration::from_millis(10000),
-    );
 
     let mut options: PropMap = HashMap::new();
     options.insert(
@@ -177,24 +173,21 @@ fn org_freedesktop_portal_screenshot(
     Ok(rgba_image)
 }
 
-pub fn wayland_capture(impl_monitor: &xcap::Monitor) -> xcap::XCapResult<RgbaImage> {
-    let x = ((impl_monitor.x() as f32) * impl_monitor.scale_factor()) as i32;
-    let y = ((impl_monitor.y() as f32) * impl_monitor.scale_factor()) as i32;
-    let width = ((impl_monitor.width() as f32) * impl_monitor.scale_factor()) as i32;
-    let height = ((impl_monitor.height() as f32) * impl_monitor.scale_factor()) as i32;
+fn run_detection(
+    conn: &Connection,
+    proxy: &Proxy<'_, &Connection>,
+    monitor: &xcap::Monitor,
+    db: &Database
+    ) -> Vec<wfinfo::database::Item> {
+    let x = ((monitor.x() as f32) * monitor.scale_factor()) as i32;
+    let y = ((monitor.y() as f32) * monitor.scale_factor()) as i32;
+    let width = ((monitor.width() as f32) * monitor.scale_factor()) as i32;
+    let height = ((monitor.height() as f32) * monitor.scale_factor()) as i32;
 
     let lock = DBUS_LOCK.lock();
-
-    let conn = Connection::new_session()?;
-    let res = org_freedesktop_portal_screenshot(&conn, x, y, width, height);
+    let frame = org_freedesktop_portal_screenshot(&conn, &proxy, x, y, width, height).unwrap();
 
     drop(lock);
-
-    res
-}
-
-fn run_detection(monitor: &xcap::Monitor, db: &Database) -> Vec<wfinfo::database::Item> {
-    let frame = wayland_capture(monitor).unwrap();
     info!("Captured");
     let image = DynamicImage::ImageRgba8(frame);
     info!("Converted");
@@ -308,7 +301,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Position: {}", position);
 
     let monitors = xcap::Monitor::all().unwrap();
-
+    
+    let conn = &Connection::new_session()?;
+    let proxy = conn.with_proxy(
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        Duration::from_millis(10000),
+    );
+    
     let (prices, dbitems) = fetch_prices_and_items()?;
     let db = Database::load_from_file(Some(&prices), Some(&dbitems));
 
@@ -352,7 +352,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     println!("Capturing");
                     let mut rewards = String::new();
 
-                    items = run_detection(monitors[0].borrow(), &db).clone();
+                    items = run_detection(conn, &proxy.borrow(), monitors[0].borrow(), &db).clone();
 
                     let best = items
                         .iter()
