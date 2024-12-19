@@ -1,11 +1,5 @@
 use std::{
-    borrow::Borrow,
-    error::Error,
-    fs::File,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    sync::mpsc,
-    thread::sleep,
-    time::Duration
+    borrow::Borrow, error::Error, fs::File, io::{BufRead, BufReader, Read, Seek, SeekFrom}, process::Command, sync::mpsc, thread::sleep, time::Duration
 };
 
 use glutin::{display::GetGlDisplay, prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext}, surface::GlSurface};
@@ -51,6 +45,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use percent_encoding::percent_decode;
+use chrono::Local;
 
 static DBUS_LOCK: Mutex<()> = Mutex::new(());
 use image::open;
@@ -194,10 +189,11 @@ pub fn wayland_capture(impl_monitor: &xcap::Monitor) -> xcap::XCapResult<RgbaIma
 }
 
 fn run_detection(monitor: &xcap::Monitor, db: &Database) -> Vec<wfinfo::database::Item> {
-    let frame = wayland_capture(monitor).unwrap();
-    info!("Captured");
-    let image = DynamicImage::ImageRgba8(frame);
-    info!("Converted");
+    // let frame = wayland_capture(monitor).unwrap();
+    let frame = capture_screenshot().unwrap();
+    println!("Captured");
+    let image = frame;
+    println!("Converted");
     let text = reward_image_to_reward_names(image, None);
     let text = text.iter().map(|s| normalize_string(s));
     println!("{:#?}", text);
@@ -336,7 +332,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     };
                     if line.contains("Pause countdown done")
                         || line.contains("Got rewards")
-                        //|| line.contains("Created /Lotus/Interface/ProjectionRewardChoice.swf")
+                        || line.contains("Created /Lotus/Interface/ProjectionRewardChoice.swf")
                     {
                         println!("> {:?}", line);
                         reward_screen_detected = true;
@@ -348,11 +344,18 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 if reward_screen_detected {
                     println!("Detected, waiting...");
-                    sleep(Duration::from_millis(1500));
-                    println!("Capturing");
+                    //sleep(Duration::from_millis(1500));
                     let mut rewards = String::new();
 
-                    items = run_detection(monitors[0].borrow(), &db).clone();
+                    for _ in 0..30 {
+                        println!("Capturing");
+                        items = run_detection(monitors[0].borrow(), &db).clone();
+                        sleep(Duration::from_millis(1000));
+
+                        if (items.len() > 0) {
+                            break;
+                        }
+                    }
 
                     let best = items
                         .iter()
@@ -500,4 +503,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     });
     Ok(())
+}
+
+fn capture_screenshot() -> Result<DynamicImage, Box<dyn std::error::Error>> {
+    let output_path = "game.jpg";
+
+    // Execute spectacle command
+    Command::new("spectacle")
+        .args(["-b", "-n", "-f", "-o", output_path])
+        .status()
+        .expect("failed to execute process");
+
+    sleep(Duration::from_millis(100));
+
+    // Read the saved image
+    let img = image::open(&output_path)?;
+
+    Ok(img)
 }

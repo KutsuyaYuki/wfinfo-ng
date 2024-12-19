@@ -16,23 +16,11 @@ const PIXEL_REWARD_YDISPLAY: f32 = 316.0;
 const PIXEL_REWARD_LINE_HEIGHT: f32 = 48.0;
 
 pub fn detect_theme(image: &DynamicImage) -> Theme {
-    // Get the size of primary monitor
-    let monitors = xcap::Monitor::all().unwrap();
-
-    let primary_width = monitors[0].width() as f32;
-    let primary_height = monitors[0].height() as f32;
-
-    let aspect_ratio = Fraction::from(primary_width / primary_height);
-    let primary_width_aspect = aspect_ratio.numer().unwrap().to_owned() as u32;
-    let primary_height_aspect = aspect_ratio.denom().unwrap().to_owned() as u32;
-
-    // Calculate screen_scaling according to current monitor dimensions
-    let screen_scaling: f32 =
-        if image.width() * primary_width_aspect > image.height() * primary_height_aspect {
-            image.height() as f32 / primary_height
-        } else {
-            image.width() as f32 / primary_width
-        };
+    let screen_scaling = if image.width() * 9 > image.height() * 16 {
+        image.height() as f32 / 1080.0
+    } else {
+        image.width() as f32 / 1920.0
+    };
 
     let line_height = PIXEL_REWARD_LINE_HEIGHT / 2.0 * screen_scaling;
     let most_width = PIXEL_REWARD_WIDTH * screen_scaling;
@@ -100,7 +88,7 @@ pub fn extract_parts(image: &DynamicImage, theme: Theme) -> Vec<DynamicImage> {
         (most_bot - most_top) as u32,
     );
     let mut prefilter_draw = prefilter.clone().into_rgb8();
-    // prefilter.save("prefilter.png").unwrap();
+    prefilter.save("prefilter.png").unwrap();
 
     let mut rows = Vec::<usize>::new();
     for y in 0..prefilter.height() {
@@ -256,7 +244,7 @@ pub fn extract_parts(image: &DynamicImage, theme: Theme) -> Vec<DynamicImage> {
 
     // prefilter_draw.save("prefilter.png").unwrap();
 
-    // partial_screenshot.save("partial_screenshot.png").unwrap();
+    partial_screenshot.save("partial_screenshot.png").unwrap();
 
     filter_and_separate_parts_from_part_box(partial_screenshot, theme)
 }
@@ -304,9 +292,9 @@ pub fn filter_and_separate_parts_from_part_box(
         }
     }
 
-    // filtered
-    //     .save("filtered.png")
-    //     .expect("Failed to write filtered image");
+     filtered
+         .save("filtered.png")
+         .expect("Failed to write filtered image");
 
     if total_even == 0.0 && total_odd == 0.0 {
         return vec![];
@@ -332,9 +320,9 @@ pub fn filter_and_separate_parts_from_part_box(
     let dynamic_image = DynamicImage::ImageRgb8(filtered);
     for i in 0..player_count {
         let cropped = dynamic_image.crop_imm(curr_left + i * box_width, 0, box_width, box_height);
-        // cropped
-        //     .save(format!("part-{}.png", i))
-        //     .expect("Failed to write image");
+         cropped
+             .save(format!("part-{}.png", i))
+             .expect("Failed to write image");
         images.push(cropped);
     }
 

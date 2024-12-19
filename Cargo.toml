@@ -52,7 +52,8 @@ winit = "0.30.5"
 thiserror = "1.0.38"
 glutin-winit = "0.5.0"
 imgui-winit-glow-renderer-viewports = { path = "imgui-winit-glow-renderer-viewports/"}
-
+chrono = "0.4"
+dirs = "5.0"
 
 dbus = { version = "0.9" }
 
